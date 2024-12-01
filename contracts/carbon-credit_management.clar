@@ -81,3 +81,103 @@
 ;; Generate a sequence for batch operations
 (define-private (generate-sequence (length uint))
   (map - (list length)))
+
+;; -----------------------------------------------------------
+;; Public Functions
+;; -----------------------------------------------------------
+
+;; Mint a single carbon credit
+(define-public (mint-carbon-credit (credit-uri-data (string-ascii 256)))
+    (begin
+        ;; Validate the caller is the contract owner
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+
+        ;; Explicitly validate the credit URI before passing to `mint-single-credit`
+        (asserts! (is-valid-credit-uri credit-uri-data) err-invalid-token-uri)
+
+        ;; Mint the carbon credit
+        (mint-single-credit credit-uri-data)))
+
+;; Batch mint carbon credits
+(define-public (batch-mint-carbon-credits (uris (list 50 (string-ascii 256))))
+  (let ((batch-size (len uris)))
+    (begin
+      (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+      (asserts! (<= batch-size max-batch-size) err-invalid-batch-size)
+      (asserts! (> batch-size u0) err-invalid-batch-size)
+      (ok (fold mint-single-credit-in-batch uris (list))))))
+
+;; Burn a carbon credit
+(define-public (burn-carbon-credit (credit-id uint))
+  (let ((credit-owner (unwrap! (nft-get-owner? carbon-credit credit-id) err-token-not-found)))
+    (asserts! (is-eq tx-sender credit-owner) err-not-token-owner)
+    (asserts! (not (is-credit-burned credit-id)) err-burn-failed)
+    (try! (nft-burn? carbon-credit credit-id credit-owner))
+    (map-set burned-credits credit-id true)
+    (ok true)))
+
+;; Transfer a carbon credit
+(define-public (transfer-carbon-credit (credit-id uint) (sender principal) (recipient principal))
+  (begin
+    (asserts! (is-eq recipient tx-sender) err-not-token-owner)
+    (asserts! (not (is-credit-burned credit-id)) err-burn-failed)
+    (let ((actual-sender (unwrap! (nft-get-owner? carbon-credit credit-id) err-not-token-owner)))
+      (asserts! (is-eq actual-sender sender) err-not-token-owner)
+      (try! (nft-transfer? carbon-credit credit-id sender recipient))
+      (ok true))))
+
+;; Update the URI of an existing credit
+(define-public (update-credit-uri (credit-id uint) (new-uri (string-ascii 256)))
+  (let ((credit-owner (unwrap! (nft-get-owner? carbon-credit credit-id) err-token-not-found)))
+    (asserts! (is-eq credit-owner tx-sender) err-not-token-owner)
+    (asserts! (is-valid-credit-uri new-uri) err-invalid-token-uri)
+    (map-set credit-uri credit-id new-uri)
+    (ok true)))
+
+;; -----------------------------------------------------------
+;; Read-Only Functions
+;; -----------------------------------------------------------
+
+;; Fetch the URI of a carbon credit
+(define-read-only (get-credit-uri (credit-id uint))
+  (ok (map-get? credit-uri credit-id)))
+
+;; Fetch the owner of a carbon credit
+(define-read-only (get-credit-owner (credit-id uint))
+  (ok (nft-get-owner? carbon-credit credit-id)))
+
+;; Fetch the last minted credit ID
+(define-read-only (get-last-credit-id)
+  (ok (var-get last-credit-id)))
+
+;; Check if a credit is burned
+(define-read-only (is-credit-burned-status (credit-id uint))
+  (ok (is-credit-burned credit-id)))
+
+;; Fetch batch metadata
+(define-read-only (get-batch-credit-ids (start-id uint) (count uint))
+  (ok (map uint-to-response
+      (unwrap-panic (as-max-len?
+        (list-tokens start-id count)
+        u50)))))
+
+;; Helper to convert uint to response
+(define-private (uint-to-response (id uint))
+  {
+    credit-id: id,
+    uri: (unwrap-panic (get-credit-uri id)),
+    owner: (unwrap-panic (get-credit-owner id)),
+    burned: (unwrap-panic (is-credit-burned-status id))
+  })
+
+;; Helper to list tokens
+(define-private (list-tokens (start uint) (count uint))
+  (map +
+    (list start)
+    (generate-sequence count)))
+
+;; -----------------------------------------------------------
+;; Contract Initialization
+;; -----------------------------------------------------------
+(begin
+  (var-set last-credit-id u0)) ;; Initialize the last credit ID
